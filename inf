@@ -1,0 +1,811 @@
+(function() {
+    // Eski menü veya top varsa temizle
+    const oldUI = document.getElementById('tekdoz-ic-bot-v20') || document.getElementById('tekdoz-ic-bot-v18');
+    const oldBall = document.getElementById('tekdoz-mini-ball');
+    if (oldUI) oldUI.remove();
+    if (oldBall) oldBall.remove();
+
+    // --- DEĞİŞKENLER VE DURUM ---
+    let aktifSekme = 'solver';    // 'bot' | 'birleştir' | 'solver'
+    let aktifMod = 'ustten_alta'; // 'ustten_alta' | 'alttan_uste' | 'rastgele'
+    let konumModu = 'rastgele';   // 'rastgele' | 'ortada'
+    let hizMS = 300;              // Oto Koyma Hızı
+    let combineHizMS = 300;       // Oto Birleştir Hızı
+    let solverHizMS = 200;        // Tarif Hızı
+    let maxRastgeleTekrar = 3;    // Rastgele Modu Çarpan Limiti (1 - 5)
+    
+    let calisiyor = false;
+    let combineCalisiyor = false;
+    let solverCalisiyor = false;
+    let mevcutIndex = 0;
+
+    // TARİF KÜTÜPHANESİ (REKÜRSİF SORGULAMA İÇİN)
+    let recipeBook = {}; // key: normalizedResult, value: { first, second, result }
+
+    // METİN TEMİZLEYİCİ VE NORMALLEŞTİRİCİ
+    function normalizeText(str) {
+        if (!str) return '';
+        return str.toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+
+    // TARİF METNİNİ SÖZLÜĞE İŞLEME
+    function parseAndBuildRecipeBook(text) {
+        recipeBook = {};
+        const lines = text.split(/[\r\n;]+/);
+        const steps = [];
+
+        for (let line of lines) {
+            line = line.trim();
+            if (!line || !line.includes('+')) continue;
+
+            let [inputs, result] = line.split(/=|->|=>/);
+            if (inputs) {
+                let parts = inputs.split('+');
+                if (parts.length >= 2) {
+                    const first = parts[0].trim();
+                    const second = parts[1].trim();
+                    const resName = result ? result.trim() : 'Sonuç';
+                    if (first && second) {
+                        const stepObj = { first, second, result: resName };
+                        steps.push(stepObj);
+                        recipeBook[normalizeText(resName)] = stepObj;
+                    }
+                }
+            }
+        }
+        return steps;
+    }
+
+    // ==========================================
+    // 1. KÜÇÜLTME TOPU (MINI BALL)
+    // ==========================================
+    const miniBall = document.createElement('div');
+    miniBall.id = 'tekdoz-mini-ball';
+    miniBall.innerText = '⚡';
+    miniBall.style.cssText = `
+        position: fixed; bottom: 20px; right: 20px; z-index: 999999;
+        width: 50px; height: 50px; border-radius: 50%;
+        background: linear-gradient(135deg, #0284c7, #38bdf8);
+        color: #ffffff; font-size: 24px; font-weight: bold;
+        display: none; align-items: center; justify-content: center;
+        cursor: pointer; box-shadow: 0 6px 20px rgba(56, 189, 248, 0.5);
+        user-select: none; border: 2px solid #ffffff; transition: transform 0.2s;
+    `;
+    miniBall.onmouseover = () => miniBall.style.transform = 'scale(1.1)';
+    miniBall.onmouseout = () => miniBall.style.transform = 'scale(1)';
+    document.body.appendChild(miniBall);
+
+    // ==========================================
+    // 2. ANA ARAYÜZ (UI PANO)
+    // ==========================================
+    const ui = document.createElement('div');
+    ui.id = 'tekdoz-ic-bot-v20';
+    ui.style.cssText = `
+        position: fixed; bottom: 20px; right: 20px; z-index: 999999;
+        background-color: #121214; color: #ffffff; padding: 16px;
+        border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.85);
+        border: 2px solid #38bdf8; font-family: 'Segoe UI', Arial, sans-serif;
+        width: 330px; user-select: none;
+    `;
+
+    const header = document.createElement('div');
+    header.style.cssText = `
+        display: flex; justify-content: space-between; align-items: center;
+        margin-bottom: 12px; cursor: move; padding-bottom: 8px;
+        border-bottom: 1px solid #27272a;
+    `;
+
+    const title = document.createElement('span');
+    title.innerText = '⚡ Infinite Craft Bot v20.0';
+    title.style.cssText = 'color: #38bdf8; font-weight: bold; font-size: 15px; pointer-events: none;';
+
+    const btnMinimize = document.createElement('button');
+    btnMinimize.innerText = '—';
+    btnMinimize.title = 'Küçült';
+    btnMinimize.style.cssText = `
+        background: #27272a; color: #a1a1aa; border: none;
+        border-radius: 6px; width: 26px; height: 26px;
+        font-weight: bold; cursor: pointer; display: flex;
+        align-items: center; justify-content: center; transition: 0.2s;
+    `;
+    btnMinimize.onmouseover = () => btnMinimize.style.backgroundColor = '#3f3f46';
+    btnMinimize.onmouseout = () => btnMinimize.style.backgroundColor = '#27272a';
+
+    header.appendChild(title);
+    header.appendChild(btnMinimize);
+    ui.appendChild(header);
+
+    // SÜRÜKLENME MANTIĞI
+    let isDragging = false, dragX = 0, dragY = 0;
+    header.onmousedown = (e) => {
+        if (e.target === btnMinimize) return;
+        isDragging = true;
+        dragX = e.clientX - ui.offsetLeft;
+        dragY = e.clientY - ui.offsetTop;
+
+        const onMouseMove = (ev) => {
+            if (!isDragging) return;
+            ui.style.left = (ev.clientX - dragX) + 'px';
+            ui.style.top = (ev.clientY - dragY) + 'px';
+            ui.style.bottom = 'auto';
+            ui.style.right = 'auto';
+        };
+
+        const onMouseUp = () => {
+            isDragging = false;
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        };
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    };
+
+    btnMinimize.onclick = () => { ui.style.display = 'none'; miniBall.style.display = 'flex'; };
+    miniBall.onclick = () => { miniBall.style.display = 'none'; ui.style.display = 'block'; };
+
+    // ==========================================
+    // 3. SEKMELER
+    // ==========================================
+    const tabBar = document.createElement('div');
+    tabBar.style.cssText = 'display: flex; gap: 4px; margin-bottom: 12px;';
+
+    const tabBot = document.createElement('button');
+    tabBot.innerText = '🤖 Oto Koyma';
+    const tabCombine = document.createElement('button');
+    tabCombine.innerText = '🧪 Oto Birleştir';
+    const tabSolver = document.createElement('button');
+    tabSolver.innerText = '🎯 Tarif Bul';
+
+    [tabBot, tabCombine, tabSolver].forEach(tab => {
+        tab.style.cssText = `
+            flex: 1; padding: 7px 4px; border-radius: 8px; font-weight: bold;
+            font-size: 11px; cursor: pointer; border: none; transition: 0.2s;
+        `;
+    });
+
+    tabBar.appendChild(tabBot);
+    tabBar.appendChild(tabCombine);
+    tabBar.appendChild(tabSolver);
+    ui.appendChild(tabBar);
+
+    const contentBot = document.createElement('div');
+    const contentCombine = document.createElement('div');
+    const contentSolver = document.createElement('div');
+
+    ui.appendChild(contentBot);
+    ui.appendChild(contentCombine);
+    ui.appendChild(contentSolver);
+
+    function sekmeGuncelle() {
+        [tabBot, tabCombine, tabSolver].forEach(t => { t.style.backgroundColor = '#27272a'; t.style.color = '#a1a1aa'; });
+        contentBot.style.display = 'none'; contentCombine.style.display = 'none'; contentSolver.style.display = 'none';
+
+        if (aktifSekme === 'bot') {
+            tabBot.style.backgroundColor = '#0284c7'; tabBot.style.color = '#ffffff'; contentBot.style.display = 'block';
+        } else if (aktifSekme === 'birleştir') {
+            tabCombine.style.backgroundColor = '#0284c7'; tabCombine.style.color = '#ffffff'; contentCombine.style.display = 'block';
+        } else if (aktifSekme === 'solver') {
+            tabSolver.style.backgroundColor = '#0284c7'; tabSolver.style.color = '#ffffff'; contentSolver.style.display = 'block';
+        }
+    }
+
+    tabBot.onclick = () => { aktifSekme = 'bot'; sekmeGuncelle(); };
+    tabCombine.onclick = () => { aktifSekme = 'birleştir'; sekmeGuncelle(); };
+    tabSolver.onclick = () => { aktifSekme = 'solver'; sekmeGuncelle(); };
+
+    // ------------------------------------------
+    // SEKME 1: OTO KOYMA İÇERİĞİ
+    // ------------------------------------------
+    const modeBox = document.createElement('div');
+    modeBox.style.cssText = 'display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px;';
+
+    const btnUstten = document.createElement('button');
+    const btnAlttan = document.createElement('button');
+    const btnRastgele = document.createElement('button');
+
+    const locLabel = document.createElement('div');
+    locLabel.innerText = '📍 Koyma Konumu:';
+    locLabel.style.cssText = 'font-size: 11px; color: #38bdf8; font-weight: bold; margin-bottom: 4px;';
+
+    const locBox = document.createElement('div');
+    locBox.style.cssText = 'display: flex; gap: 6px; margin-bottom: 10px;';
+
+    const btnKonumRastgele = document.createElement('button');
+    btnKonumRastgele.innerText = '🎲 Rastgele Konum';
+    const btnKonumOrtada = document.createElement('button');
+    btnKonumOrtada.innerText = '🎯 Hep Ortada';
+
+    [btnKonumRastgele, btnKonumOrtada].forEach(btn => {
+        btn.style.cssText = 'flex: 1; padding: 7px 4px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 10px; transition: 0.2s;';
+    });
+
+    function konumStilleriniGuncelle() {
+        if (konumModu === 'rastgele') {
+            btnKonumRastgele.style.backgroundColor = '#059669'; btnKonumRastgele.style.color = '#ffffff'; btnKonumRastgele.style.border = '1px solid #34d399';
+            btnKonumOrtada.style.backgroundColor = '#27272a'; btnKonumOrtada.style.color = '#a1a1aa'; btnKonumOrtada.style.border = '1px solid transparent';
+        } else {
+            btnKonumOrtada.style.backgroundColor = '#059669'; btnKonumOrtada.style.color = '#ffffff'; btnKonumOrtada.style.border = '1px solid #34d399';
+            btnKonumRastgele.style.backgroundColor = '#27272a'; btnKonumRastgele.style.color = '#a1a1aa'; btnKonumRastgele.style.border = '1px solid transparent';
+        }
+    }
+
+    btnKonumRastgele.onclick = () => { konumModu = 'rastgele'; konumStilleriniGuncelle(); };
+    btnKonumOrtada.onclick = () => { konumModu = 'ortada'; konumStilleriniGuncelle(); };
+
+    locBox.appendChild(btnKonumRastgele);
+    locBox.appendChild(btnKonumOrtada);
+
+    const speedSliderContainer = document.createElement('div');
+    speedSliderContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
+
+    const speedLabel = document.createElement('label');
+    speedLabel.innerText = `Koyma Hızı: ${hizMS} ms`;
+    speedLabel.style.cssText = 'font-size: 11px; color: #38bdf8; font-weight: bold;';
+
+    const speedInput = document.createElement('input');
+    speedInput.type = 'range'; speedInput.min = '20'; speedInput.max = '2000'; speedInput.step = '10'; speedInput.value = hizMS.toString();
+    speedInput.style.cursor = 'pointer';
+    speedInput.oninput = (e) => {
+        hizMS = parseInt(e.target.value);
+        speedLabel.innerText = `Koyma Hızı: ${hizMS} ms`;
+    };
+    speedSliderContainer.appendChild(speedLabel);
+    speedSliderContainer.appendChild(speedInput);
+
+    const randomSliderContainer = document.createElement('div');
+    randomSliderContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
+
+    const randomLabel = document.createElement('label');
+    randomLabel.innerText = `🎲 Rastgele Adet Limiti: 1 - ${maxRastgeleTekrar} arası`;
+    randomLabel.style.cssText = 'font-size: 11px; color: #a7f3d0; font-weight: bold;';
+
+    const randomInput = document.createElement('input');
+    randomInput.type = 'range'; randomInput.min = '1'; randomInput.max = '5'; randomInput.step = '1'; randomInput.value = maxRastgeleTekrar.toString();
+    randomInput.style.cursor = 'pointer';
+    randomInput.oninput = (e) => {
+        maxRastgeleTekrar = parseInt(e.target.value);
+        randomLabel.innerText = `🎲 Rastgele Adet Limiti: 1 - ${maxRastgeleTekrar} arası`;
+    };
+    randomSliderContainer.appendChild(randomLabel);
+    randomSliderContainer.appendChild(randomInput);
+
+    const botStartBtn = document.createElement('button');
+    botStartBtn.innerText = '▶️ OTO KOYMAYI BAŞLAT';
+    botStartBtn.style.cssText = 'width: 100%; padding: 12px; font-size: 12px; font-weight: bold; color: #ffffff; background: #0284c7; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.4); margin-bottom: 8px;';
+
+    function butonStilleriniGuncelle() {
+        [{ btn: btnUstten, mod: 'ustten_alta' }, { btn: btnAlttan, mod: 'alttan_uste' }, { btn: btnRastgele, mod: 'rastgele' }].forEach(item => {
+            if (aktifMod === item.mod) {
+                item.btn.style.backgroundColor = '#0284c7'; item.btn.style.color = '#ffffff'; item.btn.style.border = '1px solid #38bdf8';
+            } else {
+                item.btn.style.backgroundColor = '#27272a'; item.btn.style.color = '#a1a1aa'; item.btn.style.border = '1px solid transparent';
+            }
+        });
+    }
+
+    [
+        { btn: btnUstten, mod: 'ustten_alta', txt: '⬇️ Üstten Aşağıya' },
+        { btn: btnAlttan, mod: 'alttan_uste', txt: '⬆️ Alttan Üste' },
+        { btn: btnRastgele, mod: 'rastgele', txt: '🔀 Rastgele Seçim' }
+    ].forEach(item => {
+        item.btn.innerText = item.txt;
+        item.btn.style.cssText = 'padding: 8px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 12px; transition: 0.2s;';
+        item.btn.onclick = () => { aktifMod = item.mod; mevcutIndex = 0; butonStilleriniGuncelle(); };
+        modeBox.appendChild(item.btn);
+    });
+
+    contentBot.appendChild(modeBox);
+    contentBot.appendChild(locLabel);
+    contentBot.appendChild(locBox);
+    contentBot.appendChild(speedSliderContainer);
+    contentBot.appendChild(randomSliderContainer);
+    contentBot.appendChild(botStartBtn);
+
+    // ------------------------------------------
+    // SEKME 2: OTO BİRLEŞTİRME (MASADAKİLER)
+    // ------------------------------------------
+    const combineSpeedContainer = document.createElement('div');
+    combineSpeedContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
+
+    const combineSpeedLabel = document.createElement('label');
+    combineSpeedLabel.innerText = `Birleştirme Hızı: ${combineHizMS} ms`;
+    combineSpeedLabel.style.cssText = 'font-size: 11px; color: #a78bfa; font-weight: bold;';
+
+    const combineSpeedInput = document.createElement('input');
+    combineSpeedInput.type = 'range'; combineSpeedInput.min = '20'; combineSpeedInput.max = '2000'; combineSpeedInput.step = '10'; combineSpeedInput.value = combineHizMS.toString();
+    combineSpeedInput.style.cursor = 'pointer';
+    combineSpeedInput.oninput = (e) => {
+        combineHizMS = parseInt(e.target.value);
+        combineSpeedLabel.innerText = `Birleştirme Hızı: ${combineHizMS} ms`;
+    };
+    combineSpeedContainer.appendChild(combineSpeedLabel);
+    combineSpeedContainer.appendChild(combineSpeedInput);
+
+    const combineBtn = document.createElement('button');
+    combineBtn.innerText = '⚡ TABLODAKİ TÜM EŞYALARI BİRLEŞTİR';
+    combineBtn.style.cssText = 'width: 100%; padding: 12px; font-size: 11px; font-weight: bold; color: #ffffff; background: #7c3aed; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4); margin-bottom: 12px;';
+
+    contentCombine.appendChild(combineSpeedContainer);
+    contentCombine.appendChild(combineBtn);
+
+    // ------------------------------------------
+    // SEKME 3: TARİF SOLVER
+    // ------------------------------------------
+    const targetInput = document.createElement('textarea');
+    targetInput.rows = 4;
+    targetInput.placeholder = 'Kopyaladığın Tarifi Buraya Yapıştır:\n\nFire + Water = Steam\nEarth + Wind = Dust\nDust + Earth = Planet';
+    targetInput.style.cssText = 'width: 100%; padding: 8px; box-sizing: border-box; background: #18181b; color: #ffffff; border: 1px solid #3f3f46; border-radius: 8px; font-size: 11px; margin-bottom: 10px; outline: none; resize: vertical; font-family: monospace;';
+
+    const solverSpeedContainer = document.createElement('div');
+    solverSpeedContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
+
+    const solverSpeedLabel = document.createElement('label');
+    solverSpeedLabel.innerText = `Tarif Adım Hızı: ${solverHizMS} ms`;
+    solverSpeedLabel.style.cssText = 'font-size: 11px; color: #38bdf8; font-weight: bold;';
+
+    const solverSpeedInput = document.createElement('input');
+    solverSpeedInput.type = 'range'; solverSpeedInput.min = '10'; solverSpeedInput.max = '2000'; solverSpeedInput.step = '10'; solverSpeedInput.value = solverHizMS.toString();
+    solverSpeedInput.style.cursor = 'pointer';
+
+    solverSpeedInput.oninput = (e) => {
+        solverHizMS = parseInt(e.target.value);
+        solverSpeedLabel.innerText = `Tarif Adım Hızı: ${solverHizMS} ms`;
+    };
+
+    solverSpeedContainer.appendChild(solverSpeedLabel);
+    solverSpeedContainer.appendChild(solverSpeedInput);
+
+    const solveBtn = document.createElement('button');
+    solveBtn.innerText = '🚀 TARİFİ BAŞLAT';
+    solveBtn.style.cssText = 'width: 100%; padding: 12px; font-size: 12px; font-weight: bold; color: #ffffff; background: #0284c7; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.4); margin-bottom: 12px;';
+
+    contentSolver.appendChild(targetInput);
+    contentSolver.appendChild(solverSpeedContainer);
+    contentSolver.appendChild(solveBtn);
+
+    const infoText = document.createElement('div');
+    infoText.style.cssText = 'font-size: 11px; color: #9ca3af; margin-top: 12px; text-align: center; font-weight: 500; word-break: break-word; min-height: 28px; display: flex; align-items: center; justify-content: center; background: #18181b; padding: 6px; border-radius: 6px; border: 1px solid #27272a;';
+    infoText.innerText = 'Durum: Hazır';
+    ui.appendChild(infoText);
+
+    document.body.appendChild(ui);
+    sekmeGuncelle();
+    butonStilleriniGuncelle();
+    konumStilleriniGuncelle();
+
+    // ==========================================
+    // 4. ÇEKİRDEK DOM ETKİLEŞİM MOTORU
+    // ==========================================
+
+    function getSidebarItems() {
+        let items = Array.from(document.querySelectorAll('.sidebar .item, .items-container .item, .items .item'));
+        if (items.length === 0) {
+            items = Array.from(document.querySelectorAll('.item')).filter(el => el.getBoundingClientRect().left > (window.innerWidth * 0.5));
+        }
+        return items;
+    }
+
+    function getBoardItems() {
+        return Array.from(document.querySelectorAll('.instance, .container .instance')).filter(el => {
+            const rect = el.getBoundingClientRect();
+            return rect.left < (window.innerWidth * 0.70) && rect.width > 0 && rect.height > 0;
+        });
+    }
+
+    function esyayiMasayaAt(itemElement, posX, posY) {
+        if (!itemElement) return;
+
+        let targetX, targetY;
+
+        if (posX !== undefined && posY !== undefined) {
+            targetX = posX;
+            targetY = posY;
+        } else if (konumModu === 'ortada') {
+            targetX = window.innerWidth * 0.35;
+            targetY = window.innerHeight * 0.40;
+        } else {
+            const minX = 80;
+            const maxX = Math.max(minX + 50, window.innerWidth * 0.60);
+            const minY = 80;
+            const maxY = Math.max(minY + 50, window.innerHeight * 0.80);
+
+            targetX = Math.floor(Math.random() * (maxX - minX)) + minX;
+            targetY = Math.floor(Math.random() * (maxY - minY)) + minY;
+        }
+
+        const eventOpts = { bubbles: true, cancelable: true, view: window, clientX: targetX, clientY: targetY, pageX: targetX, pageY: targetY };
+        itemElement.dispatchEvent(new MouseEvent('mousedown', eventOpts));
+        itemElement.dispatchEvent(new MouseEvent('mouseup', eventOpts));
+        itemElement.dispatchEvent(new MouseEvent('click', eventOpts));
+    }
+
+    function ikiEsyayiBirlestir(el1, el2) {
+        if (!el1 || !el2) return;
+        const rect1 = el1.getBoundingClientRect();
+        const rect2 = el2.getBoundingClientRect();
+        const x1 = rect1.left + rect1.width / 2, y1 = rect1.top + rect1.height / 2;
+        const x2 = rect2.left + rect2.width / 2, y2 = rect2.top + rect2.height / 2;
+
+        const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x1, clientY: y1, buttons: 1 });
+        const move = new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: x2, clientY: y2, buttons: 1 });
+        const up = new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x2, clientY: y2 });
+
+        el1.dispatchEvent(down);
+        document.dispatchEvent(move);
+        el2.dispatchEvent(up);
+    }
+
+    async function masayaEsyaCikarByName(esyaAdi, posX, posY) {
+        let sidebarItems = getSidebarItems();
+        const hedefNorm = normalizeText(esyaAdi);
+
+        let hedefEl = sidebarItems.find(el => normalizeText(el.innerText || el.textContent) === hedefNorm);
+
+        // Arama Kutusu İle Bulma
+        if (!hedefEl) {
+            const searchInput = document.querySelector('.sidebar-input, .sidebar input, input[placeholder*="Search"]');
+            if (searchInput) {
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSetter.call(searchInput, esyaAdi);
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                await new Promise(r => setTimeout(r, 40));
+
+                sidebarItems = getSidebarItems();
+                hedefEl = sidebarItems.find(el => normalizeText(el.innerText || el.textContent) === hedefNorm);
+
+                nativeSetter.call(searchInput, '');
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+
+        // Scroll Kaydırarak Bulma
+        if (!hedefEl) {
+            const sidebarScroll = document.querySelector('.sidebar, .items-container, .items');
+            if (sidebarScroll) {
+                const step = 400;
+                for (let s = 0; s <= sidebarScroll.scrollHeight; s += step) {
+                    sidebarScroll.scrollTop = s;
+                    await new Promise(r => setTimeout(r, 10));
+                    sidebarItems = getSidebarItems();
+                    hedefEl = sidebarItems.find(el => normalizeText(el.innerText || el.textContent) === hedefNorm);
+                    if (hedefEl) break;
+                }
+            }
+        }
+
+        if (hedefEl) {
+            esyayiMasayaAt(hedefEl, posX, posY);
+            return true;
+        }
+        return false;
+    }
+
+    async function itemVarMiMenude(esyaAdi) {
+        let sidebarItems = getSidebarItems();
+        const norm = normalizeText(esyaAdi);
+        let varMi = sidebarItems.some(el => normalizeText(el.innerText || el.textContent) === norm);
+        if (varMi) return true;
+
+        // Arama kutusunu deneyip emin olalım
+        const searchInput = document.querySelector('.sidebar-input, .sidebar input, input[placeholder*="Search"]');
+        if (searchInput) {
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeSetter.call(searchInput, esyaAdi);
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            await new Promise(r => setTimeout(r, 30));
+
+            sidebarItems = getSidebarItems();
+            varMi = sidebarItems.some(el => normalizeText(el.innerText || el.textContent) === norm);
+
+            nativeSetter.call(searchInput, '');
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        return varMi;
+    }
+
+    async function masadanYeniEsyaBekle(eskiSayi, timeout = 300) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            const currentBoard = getBoardItems();
+            if (currentBoard.length > eskiSayi) {
+                return currentBoard[currentBoard.length - 1];
+            }
+            await new Promise(r => setTimeout(r, 10));
+        }
+        return null;
+    }
+
+    // ==========================================
+    // 5. REKÜRSİF EŞYA ÜRETİCİ VE GARANTİ EDİCİ
+    // ==========================================
+
+    async function esyayiGarantiEt(esyaAdi, visiting = new Set()) {
+        if (!solverCalisiyor) return false;
+
+        const norm = normalizeText(esyaAdi);
+
+        // Zaten menüde var mı?
+        if (await itemVarMiMenude(esyaAdi)) {
+            return true;
+        }
+
+        // Sonsuz döngü koruması
+        if (visiting.has(norm)) {
+            infoText.innerText = `⚠️ Tarif Döngüsü: ${esyaAdi}`;
+            return false;
+        }
+
+        // Kopyalanan tariflerde var mı?
+        const recipe = recipeBook[norm];
+        if (!recipe) {
+            infoText.innerText = `❌ "${esyaAdi}" menüde yok ve tarifi bulunamadı!`;
+            return false;
+        }
+
+        visiting.add(norm);
+
+        infoText.innerText = `🛠️ Eksik Üretiliyor: ${esyaAdi} (${recipe.first} + ${recipe.second})`;
+
+        // 1. Birinci bileşeni üret/getir
+        const ok1 = await esyayiGarantiEt(recipe.first, new Set(visiting));
+        if (!ok1) return false;
+
+        // 2. İkinci bileşeni üret/getir
+        const ok2 = await esyayiGarantiEt(recipe.second, new Set(visiting));
+        if (!ok2) return false;
+
+        // 3. İki bileşeni de masaya çıkar ve birleştir
+        const targetX = window.innerWidth * 0.35;
+        const targetY = window.innerHeight * 0.40;
+
+        const count1 = getBoardItems().length;
+        await masayaEsyaCikarByName(recipe.first, targetX, targetY);
+        let el1 = await masadanYeniEsyaBekle(count1, Math.max(200, solverHizMS * 2));
+
+        const count2 = getBoardItems().length;
+        await masayaEsyaCikarByName(recipe.second, targetX + 15, targetY + 15);
+        let el2 = await masadanYeniEsyaBekle(count2, Math.max(200, solverHizMS * 2));
+
+        if (el1 && el2) {
+            ikiEsyayiBirlestir(el1, el2);
+            infoText.innerText = `✨ Üretildi: ${recipe.result}`;
+            await new Promise(r => setTimeout(r, Math.max(80, solverHizMS)));
+        }
+
+        visiting.delete(norm);
+
+        return await itemVarMiMenude(esyaAdi);
+    }
+
+    // ==========================================
+    // 6. OTO KOYMA MANTIĞI
+    // ==========================================
+
+    async function otoKoymaDongusu() {
+        while (calisiyor) {
+            const items = getSidebarItems();
+            if (items.length === 0) {
+                infoText.innerText = 'Menüde eşya bulunamadı!';
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+
+            if (aktifMod === 'ustten_alta') {
+                if (mevcutIndex >= items.length) mevcutIndex = 0;
+                const targetEl = items[mevcutIndex];
+                mevcutIndex++;
+                if (targetEl) {
+                    esyayiMasayaAt(targetEl);
+                    infoText.innerText = `Koyuldu: ${(targetEl.innerText || targetEl.textContent).trim()}`;
+                }
+                await new Promise(r => setTimeout(r, hizMS));
+            } else if (aktifMod === 'alttan_uste') {
+                if (mevcutIndex < 0 || mevcutIndex >= items.length) mevcutIndex = items.length - 1;
+                const targetEl = items[mevcutIndex];
+                mevcutIndex--;
+                if (targetEl) {
+                    esyayiMasayaAt(targetEl);
+                    infoText.innerText = `Koyuldu: ${(targetEl.innerText || targetEl.textContent).trim()}`;
+                }
+                await new Promise(r => setTimeout(r, hizMS));
+            } else if (aktifMod === 'rastgele') {
+                const rnd = Math.floor(Math.random() * items.length);
+                const targetEl = items[rnd];
+                
+                const tekrarSayisi = Math.floor(Math.random() * maxRastgeleTekrar) + 1;
+                const esyaAdi = (targetEl.innerText || targetEl.textContent).trim();
+
+                for (let t = 0; t < tekrarSayisi; t++) {
+                    if (!calisiyor) break;
+                    esyayiMasayaAt(targetEl);
+                    infoText.innerText = `🎲 Rastgele (${t + 1}/${tekrarSayisi}): ${esyaAdi}`;
+                    await new Promise(r => setTimeout(r, hizMS));
+                }
+            }
+        }
+    }
+
+    botStartBtn.onclick = () => {
+        calisiyor = !calisiyor;
+        if (calisiyor) {
+            botStartBtn.innerText = '⏹ DURDUR';
+            botStartBtn.style.backgroundColor = '#dc2626';
+            infoText.innerText = 'Oto Koyma başlatıldı...';
+            otoKoymaDongusu();
+        } else {
+            botStartBtn.innerText = '▶️ OTO KOYMAYI BAŞLAT';
+            botStartBtn.style.backgroundColor = '#0284c7';
+            infoText.innerText = 'Oto Koyma durduruldu.';
+        }
+    };
+
+    // ==========================================
+    // 7. TABLODAKİ EŞYALARI BİRLEŞTİRME
+    // ==========================================
+
+    async function masadakiTumKombinasyonlariDene() {
+        combineCalisiyor = true;
+        combineBtn.innerText = '⏹️ BİRLEŞTİRMEYİ DURDUR';
+        combineBtn.style.backgroundColor = '#dc2626';
+
+        while (combineCalisiyor) {
+            let boardItems = getBoardItems();
+
+            if (boardItems.length < 2) {
+                infoText.innerText = '⚠️ Tabloda/Masada en az 2 eşya olmalı!';
+                await new Promise(r => setTimeout(r, 600));
+                continue;
+            }
+
+            let yapildi = false;
+
+            for (let i = 0; i < boardItems.length - 1; i++) {
+                for (let j = i + 1; j < boardItems.length; j++) {
+                    if (!combineCalisiyor) break;
+
+                    const guncelBoard = getBoardItems();
+                    const el1 = boardItems[i];
+                    const el2 = boardItems[j];
+
+                    if (guncelBoard.includes(el1) && guncelBoard.includes(el2)) {
+                        const name1 = (el1.innerText || el1.textContent).trim();
+                        const name2 = (el2.innerText || el2.textContent).trim();
+
+                        infoText.innerText = `🧪 Masadakiler: ${name1} + ${name2}`;
+
+                        ikiEsyayiBirlestir(el1, el2);
+                        yapildi = true;
+
+                        await new Promise(r => setTimeout(r, combineHizMS));
+                    }
+                }
+                if (!combineCalisiyor) break;
+            }
+
+            if (!yapildi && combineCalisiyor) {
+                infoText.innerText = '🔄 Masadaki tur bitti, yeni eşya bekleniyor...';
+                await new Promise(r => setTimeout(r, 800));
+            }
+        }
+
+        combineCalisiyor = false;
+        combineBtn.innerText = '⚡ TABLODAKİ TÜM EŞYALARI BİRLEŞTİR';
+        combineBtn.style.backgroundColor = '#7c3aed';
+    }
+
+    combineBtn.onclick = () => {
+        if (combineCalisiyor) {
+            combineCalisiyor = false;
+            combineBtn.innerText = '⚡ TABLODAKİ TÜM EŞYALARI BİRLEŞTİR';
+            combineBtn.style.backgroundColor = '#7c3aed';
+            infoText.innerText = 'Birleştirme durduruldu.';
+        } else {
+            masadakiTumKombinasyonlariDene();
+        }
+    };
+
+    // ==========================================
+    // 8. YEREL TARİF ÇÖZÜCÜ (REKÜRSİF DESTEKLİ & ENVANTER ATLAMALI)
+    // ==========================================
+
+    async function tarifiBulAndCoz(inputStr) {
+        if (!inputStr || inputStr.trim() === '') {
+            infoText.innerText = 'Lütfen metin tarifini yapıştırın!';
+            return;
+        }
+
+        solverCalisiyor = true;
+        solveBtn.innerText = 'DURDUR';
+        solveBtn.style.backgroundColor = '#dc2626';
+
+        infoText.innerText = '📝 Tarif kitabı analiz ediliyor...';
+        const adimlar = parseAndBuildRecipeBook(inputStr);
+
+        if (!Array.isArray(adimlar) || adimlar.length === 0) {
+            infoText.innerText = `❌ Geçerli bir tarif okunamadı!`;
+            solverCalisiyor = false;
+            solveBtn.innerText = '🚀 TARİFİ BAŞLAT';
+            solveBtn.style.backgroundColor = '#0284c7';
+            return;
+        }
+
+        infoText.innerText = `✅ ${adimlar.length} Adımlık Tarif Başlatılıyor...`;
+
+        const targetX = window.innerWidth * 0.35;
+        const targetY = window.innerHeight * 0.40;
+
+        for (let i = 0; i < adimlar.length; i++) {
+            if (!solverCalisiyor) break;
+
+            const step = adimlar[i];
+            const first = step.first;
+            const second = step.second;
+            const result = step.result || 'Sonuç';
+
+            // --- AKILLI ENVANTER KONTROLÜ (v20.0) ---
+            // Tarifteki sonuç elemanı zaten envanterde/menüde varsa o adımı atla!
+            if (result && result !== 'Sonuç' && await itemVarMiMenude(result)) {
+                infoText.innerText = `[${i + 1}/${adimlar.length}] ⏭️ [ATLANDI] "${result}" zaten menüde var.`;
+                await new Promise(r => setTimeout(r, 100));
+                continue;
+            }
+
+            infoText.innerText = `[${i + 1}/${adimlar.length}] Kontrol Ediliyor: ${first} + ${second}`;
+
+            // EKSİK MALZEMELERİ GERİYE DÖNÜK ÜRET (REKÜRSİF MANTIĞI)
+            const ok1 = await esyayiGarantiEt(first);
+            const ok2 = await esyayiGarantiEt(second);
+
+            if (ok1 && ok2) {
+                infoText.innerText = `[${i + 1}/${adimlar.length}] ${first} + ${second} ➔ ${result}`;
+
+                const count1 = getBoardItems().length;
+                await masayaEsyaCikarByName(first, targetX, targetY);
+                let el1 = await masadanYeniEsyaBekle(count1, Math.max(200, solverHizMS * 2));
+
+                const count2 = getBoardItems().length;
+                await masayaEsyaCikarByName(second, targetX + 15, targetY + 15);
+                let el2 = await masadanYeniEsyaBekle(count2, Math.max(200, solverHizMS * 2));
+
+                if (el1 && el2) {
+                    ikiEsyayiBirlestir(el1, el2);
+                } else {
+                    const boardItems = getBoardItems();
+                    if (boardItems.length >= 2) {
+                        ikiEsyayiBirlestir(boardItems[boardItems.length - 2], boardItems[boardItems.length - 1]);
+                    }
+                }
+            } else {
+                const eksik = !ok1 ? first : second;
+                infoText.innerText = `⚠️ "${eksik}" üretilemedi, sonraki adıma geçiliyor...`;
+                await new Promise(r => setTimeout(r, 400));
+            }
+
+            await new Promise(r => setTimeout(r, solverHizMS));
+        }
+
+        if (solverCalisiyor) {
+            infoText.innerText = `🎉 Tüm Tarif Adımları Başarıyla İşlendi!`;
+        }
+
+        solverCalisiyor = false;
+        solveBtn.innerText = '🚀 TARİFİ BAŞLAT';
+        solveBtn.style.backgroundColor = '#0284c7';
+    }
+
+    solveBtn.onclick = () => {
+        if (solverCalisiyor) {
+            solverCalisiyor = false;
+            solveBtn.innerText = '🚀 TARİFİ BAŞLAT';
+            solveBtn.style.backgroundColor = '#0284c7';
+            infoText.innerText = 'İşlem durduruldu.';
+            return;
+        }
+
+        tarifiBulAndCoz(targetInput.value);
+    };
+
+    console.log("%c[Tekdoz Bot] v20.0 (Recursive Auto-Craft) Aktif!", "color: #38bdf8; font-weight: bold;");
+})();
