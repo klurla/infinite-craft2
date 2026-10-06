@@ -5,13 +5,49 @@
     if (oldUI) oldUI.remove();
     if (oldBall) oldBall.remove();
 
+    // --- RATE LIMIT (429) BYPASS MOTORU ---
+    let isRateLimited = false;
+    let rateLimitEndTime = 0;
+    const COOLDOWN_MS = 6000; // Rate limit yendiğinde beklenecek soğuma süresi (ms)
+
+    if (!window.__tekdozFetchPatched) {
+        const originalFetch = window.fetch;
+        window.fetch = async function(...args) {
+            const response = await originalFetch.apply(this, args);
+            if (response && response.status === 429) {
+                console.warn("[Tekdoz Bot] Rate Limit (429) yakalandı! Bot soğumaya alınıyor...");
+                isRateLimited = true;
+                rateLimitEndTime = Date.now() + COOLDOWN_MS;
+            }
+            return response;
+        };
+        window.__tekdozFetchPatched = true;
+    }
+
+    async function rateLimitKontrol() {
+        while (isRateLimited) {
+            const kalanSec = Math.ceil((rateLimitEndTime - Date.now()) / 1000);
+            if (kalanSec > 0) {
+                if (typeof infoText !== 'undefined' && infoText) {
+                    infoText.innerText = `⏳ Rate Limit (429)! ${kalanSec}sn bekleniyor...`;
+                }
+                await new Promise(r => setTimeout(r, 500));
+            } else {
+                isRateLimited = false;
+                if (typeof infoText !== 'undefined' && infoText) {
+                    infoText.innerText = `⚡ Rate Limit bitti, devam ediliyor...`;
+                }
+            }
+        }
+    }
+
     // --- DEĞİŞKENLER VE DURUM ---
     let aktifSekme = 'solver';    // 'bot' | 'birleştir' | 'solver'
     let aktifMod = 'ustten_alta'; // 'ustten_alta' | 'alttan_uste' | 'rastgele'
     let konumModu = 'rastgele';   // 'rastgele' | 'ortada'
-    let hizMS = 300;              // Oto Koyma Hızı
-    let combineHizMS = 300;       // Oto Birleştir Hızı
-    let solverHizMS = 200;        // Tarif Hızı
+    let hizMS = 350;              // Oto Koyma Hızı (Min: 1ms)
+    let combineHizMS = 400;       // Oto Birleştir Hızı (Min: 1ms)
+    let solverHizMS = 300;        // Tarif Hızı (Min: 1ms)
     let maxRastgeleTekrar = 3;    // Rastgele Modu Çarpan Limiti (1 - 5)
     
     let calisiyor = false;
@@ -19,16 +55,14 @@
     let solverCalisiyor = false;
     let mevcutIndex = 0;
 
-    // TARİF KÜTÜPHANESİ (REKÜRSİF SORGULAMA İÇİN)
-    let recipeBook = {}; // key: normalizedResult, value: { first, second, result }
+    // TARİF KÜTÜPHANESİ
+    let recipeBook = {}; 
 
-    // METİN TEMİZLEYİCİ VE NORMALLEŞTİRİCİ
     function normalizeText(str) {
         if (!str) return '';
         return str.toLowerCase().replace(/[^a-z0-9]/g, '');
     }
 
-    // TARİF METNİNİ SÖZLÜĞE İŞLEME
     function parseAndBuildRecipeBook(text) {
         recipeBook = {};
         const lines = text.split(/[\r\n;]+/);
@@ -54,6 +88,81 @@
             }
         }
         return steps;
+    }
+
+    // ==========================================
+    // YARDIMCI: KLAVYEYLE DÜZENLENEBİLİR HIZ BİLEŞENİ (1ms MIN)
+    // ==========================================
+    function createSpeedControl(titleText, initialVal, colorHex, onChangeCallback) {
+        const container = document.createElement('div');
+        container.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
+
+        const topRow = document.createElement('div');
+        topRow.style.cssText = 'display: flex; justify-content: space-between; align-items: center;';
+
+        const label = document.createElement('span');
+        label.innerText = titleText;
+        label.style.cssText = `font-size: 11px; color: ${colorHex}; font-weight: bold;`;
+
+        const inputGroup = document.createElement('div');
+        inputGroup.style.cssText = 'display: flex; align-items: center; gap: 2px;';
+
+        const numInput = document.createElement('input');
+        numInput.type = 'text';
+        numInput.value = initialVal;
+        numInput.style.cssText = `
+            width: 50px; background: #27272a; color: #ffffff; border: 1px solid #3f3f46;
+            border-radius: 4px; padding: 2px 4px; font-size: 11px; font-weight: bold;
+            text-align: center; outline: none; transition: border-color 0.2s;
+        `;
+        numInput.onfocus = () => numInput.style.borderColor = colorHex;
+        numInput.onblur = () => numInput.style.borderColor = '#3f3f46';
+
+        const unit = document.createElement('span');
+        unit.innerText = ' ms';
+        unit.style.cssText = 'font-size: 11px; color: #a1a1aa; font-weight: bold;';
+
+        inputGroup.appendChild(numInput);
+        inputGroup.appendChild(unit);
+        topRow.appendChild(label);
+        topRow.appendChild(inputGroup);
+
+        const rangeInput = document.createElement('input');
+        rangeInput.type = 'range';
+        rangeInput.min = '1';
+        rangeInput.max = '2000';
+        rangeInput.step = '1';
+        rangeInput.value = initialVal;
+        rangeInput.style.cursor = 'pointer';
+
+        function syncValue(val) {
+            let num = parseInt(val);
+            if (isNaN(num) || num < 1) num = 1;
+            numInput.value = num;
+            rangeInput.value = Math.min(num, 2000); // Slider maks 2000 gösterir ama manuel daha yüksek yazılabilir
+            onChangeCallback(num);
+        }
+
+        // Sadece rakam girilmesini sağla
+        numInput.onkeydown = (e) => {
+            if (!/[0-9]/.test(e.key) && !['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Enter'].includes(e.key)) {
+                e.preventDefault();
+            }
+        };
+
+        numInput.oninput = (e) => {
+            let cleanVal = e.target.value.replace(/[^0-9]/g, '');
+            if (cleanVal === '') cleanVal = '1';
+            syncValue(cleanVal);
+        };
+
+        rangeInput.oninput = (e) => {
+            syncValue(e.target.value);
+        };
+
+        container.appendChild(topRow);
+        container.appendChild(rangeInput);
+        return container;
     }
 
     // ==========================================
@@ -96,8 +205,8 @@
     `;
 
     const title = document.createElement('span');
-    title.innerText = '⚡ Infinite Craft Bot v20.0';
-    title.style.cssText = 'color: #38bdf8; font-weight: bold; font-size: 15px; pointer-events: none;';
+    title.innerText = '⚡ Infinite Craft Bot v20.0 (Bypass)';
+    title.style.cssText = 'color: #38bdf8; font-weight: bold; font-size: 14px; pointer-events: none;';
 
     const btnMinimize = document.createElement('button');
     btnMinimize.innerText = '—';
@@ -236,22 +345,8 @@
     locBox.appendChild(btnKonumRastgele);
     locBox.appendChild(btnKonumOrtada);
 
-    const speedSliderContainer = document.createElement('div');
-    speedSliderContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
-
-    const speedLabel = document.createElement('label');
-    speedLabel.innerText = `Koyma Hızı: ${hizMS} ms`;
-    speedLabel.style.cssText = 'font-size: 11px; color: #38bdf8; font-weight: bold;';
-
-    const speedInput = document.createElement('input');
-    speedInput.type = 'range'; speedInput.min = '20'; speedInput.max = '2000'; speedInput.step = '10'; speedInput.value = hizMS.toString();
-    speedInput.style.cursor = 'pointer';
-    speedInput.oninput = (e) => {
-        hizMS = parseInt(e.target.value);
-        speedLabel.innerText = `Koyma Hızı: ${hizMS} ms`;
-    };
-    speedSliderContainer.appendChild(speedLabel);
-    speedSliderContainer.appendChild(speedInput);
+    // DÜZENLENEBİLİR HIZ KONTROLÜ (OTO KOYMA)
+    const placeSpeedControl = createSpeedControl('Koyma Hızı', hizMS, '#38bdf8', (val) => hizMS = val);
 
     const randomSliderContainer = document.createElement('div');
     randomSliderContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
@@ -298,35 +393,21 @@
     contentBot.appendChild(modeBox);
     contentBot.appendChild(locLabel);
     contentBot.appendChild(locBox);
-    contentBot.appendChild(speedSliderContainer);
+    contentBot.appendChild(placeSpeedControl);
     contentBot.appendChild(randomSliderContainer);
     contentBot.appendChild(botStartBtn);
 
     // ------------------------------------------
     // SEKME 2: OTO BİRLEŞTİRME (MASADAKİLER)
     // ------------------------------------------
-    const combineSpeedContainer = document.createElement('div');
-    combineSpeedContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
-
-    const combineSpeedLabel = document.createElement('label');
-    combineSpeedLabel.innerText = `Birleştirme Hızı: ${combineHizMS} ms`;
-    combineSpeedLabel.style.cssText = 'font-size: 11px; color: #a78bfa; font-weight: bold;';
-
-    const combineSpeedInput = document.createElement('input');
-    combineSpeedInput.type = 'range'; combineSpeedInput.min = '20'; combineSpeedInput.max = '2000'; combineSpeedInput.step = '10'; combineSpeedInput.value = combineHizMS.toString();
-    combineSpeedInput.style.cursor = 'pointer';
-    combineSpeedInput.oninput = (e) => {
-        combineHizMS = parseInt(e.target.value);
-        combineSpeedLabel.innerText = `Birleştirme Hızı: ${combineHizMS} ms`;
-    };
-    combineSpeedContainer.appendChild(combineSpeedLabel);
-    combineSpeedContainer.appendChild(combineSpeedInput);
+    // DÜZENLENEBİLİR HIZ KONTROLÜ (OTO BİRLEŞTİR)
+    const combineSpeedControl = createSpeedControl('Birleştirme Hızı', combineHizMS, '#a78bfa', (val) => combineHizMS = val);
 
     const combineBtn = document.createElement('button');
     combineBtn.innerText = '⚡ TABLODAKİ TÜM EŞYALARI BİRLEŞTİR';
     combineBtn.style.cssText = 'width: 100%; padding: 12px; font-size: 11px; font-weight: bold; color: #ffffff; background: #7c3aed; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4); margin-bottom: 12px;';
 
-    contentCombine.appendChild(combineSpeedContainer);
+    contentCombine.appendChild(combineSpeedControl);
     contentCombine.appendChild(combineBtn);
 
     // ------------------------------------------
@@ -337,36 +418,20 @@
     targetInput.placeholder = 'Kopyaladığın Tarifi Buraya Yapıştır:\n\nFire + Water = Steam\nEarth + Wind = Dust\nDust + Earth = Planet';
     targetInput.style.cssText = 'width: 100%; padding: 8px; box-sizing: border-box; background: #18181b; color: #ffffff; border: 1px solid #3f3f46; border-radius: 8px; font-size: 11px; margin-bottom: 10px; outline: none; resize: vertical; font-family: monospace;';
 
-    const solverSpeedContainer = document.createElement('div');
-    solverSpeedContainer.style.cssText = 'display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; background: #18181b; padding: 8px; border-radius: 8px; border: 1px solid #3f3f46;';
-
-    const solverSpeedLabel = document.createElement('label');
-    solverSpeedLabel.innerText = `Tarif Adım Hızı: ${solverHizMS} ms`;
-    solverSpeedLabel.style.cssText = 'font-size: 11px; color: #38bdf8; font-weight: bold;';
-
-    const solverSpeedInput = document.createElement('input');
-    solverSpeedInput.type = 'range'; solverSpeedInput.min = '10'; solverSpeedInput.max = '2000'; solverSpeedInput.step = '10'; solverSpeedInput.value = solverHizMS.toString();
-    solverSpeedInput.style.cursor = 'pointer';
-
-    solverSpeedInput.oninput = (e) => {
-        solverHizMS = parseInt(e.target.value);
-        solverSpeedLabel.innerText = `Tarif Adım Hızı: ${solverHizMS} ms`;
-    };
-
-    solverSpeedContainer.appendChild(solverSpeedLabel);
-    solverSpeedContainer.appendChild(solverSpeedInput);
+    // DÜZENLENEBİLİR HIZ KONTROLÜ (TARİF SOLVER)
+    const solverSpeedControl = createSpeedControl('Tarif Adım Hızı', solverHizMS, '#38bdf8', (val) => solverHizMS = val);
 
     const solveBtn = document.createElement('button');
     solveBtn.innerText = '🚀 TARİFİ BAŞLAT';
     solveBtn.style.cssText = 'width: 100%; padding: 12px; font-size: 12px; font-weight: bold; color: #ffffff; background: #0284c7; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.4); margin-bottom: 12px;';
 
     contentSolver.appendChild(targetInput);
-    contentSolver.appendChild(solverSpeedContainer);
+    contentSolver.appendChild(solverSpeedControl);
     contentSolver.appendChild(solveBtn);
 
     const infoText = document.createElement('div');
     infoText.style.cssText = 'font-size: 11px; color: #9ca3af; margin-top: 12px; text-align: center; font-weight: 500; word-break: break-word; min-height: 28px; display: flex; align-items: center; justify-content: center; background: #18181b; padding: 6px; border-radius: 6px; border: 1px solid #27272a;';
-    infoText.innerText = 'Durum: Hazır';
+    infoText.innerText = 'Durum: Hazır (Rate Bypass Aktif)';
     ui.appendChild(infoText);
 
     document.body.appendChild(ui);
@@ -437,12 +502,12 @@
     }
 
     async function masayaEsyaCikarByName(esyaAdi, posX, posY) {
+        await rateLimitKontrol();
         let sidebarItems = getSidebarItems();
         const hedefNorm = normalizeText(esyaAdi);
 
         let hedefEl = sidebarItems.find(el => normalizeText(el.innerText || el.textContent) === hedefNorm);
 
-        // Arama Kutusu İle Bulma
         if (!hedefEl) {
             const searchInput = document.querySelector('.sidebar-input, .sidebar input, input[placeholder*="Search"]');
             if (searchInput) {
@@ -459,7 +524,6 @@
             }
         }
 
-        // Scroll Kaydırarak Bulma
         if (!hedefEl) {
             const sidebarScroll = document.querySelector('.sidebar, .items-container, .items');
             if (sidebarScroll) {
@@ -487,7 +551,6 @@
         let varMi = sidebarItems.some(el => normalizeText(el.innerText || el.textContent) === norm);
         if (varMi) return true;
 
-        // Arama kutusunu deneyip emin olalım
         const searchInput = document.querySelector('.sidebar-input, .sidebar input, input[placeholder*="Search"]');
         if (searchInput) {
             const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
@@ -508,6 +571,7 @@
     async function masadanYeniEsyaBekle(eskiSayi, timeout = 300) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
+            await rateLimitKontrol();
             const currentBoard = getBoardItems();
             if (currentBoard.length > eskiSayi) {
                 return currentBoard[currentBoard.length - 1];
@@ -523,21 +587,19 @@
 
     async function esyayiGarantiEt(esyaAdi, visiting = new Set()) {
         if (!solverCalisiyor) return false;
+        await rateLimitKontrol();
 
         const norm = normalizeText(esyaAdi);
 
-        // Zaten menüde var mı?
         if (await itemVarMiMenude(esyaAdi)) {
             return true;
         }
 
-        // Sonsuz döngü koruması
         if (visiting.has(norm)) {
             infoText.innerText = `⚠️ Tarif Döngüsü: ${esyaAdi}`;
             return false;
         }
 
-        // Kopyalanan tariflerde var mı?
         const recipe = recipeBook[norm];
         if (!recipe) {
             infoText.innerText = `❌ "${esyaAdi}" menüde yok ve tarifi bulunamadı!`;
@@ -548,30 +610,28 @@
 
         infoText.innerText = `🛠️ Eksik Üretiliyor: ${esyaAdi} (${recipe.first} + ${recipe.second})`;
 
-        // 1. Birinci bileşeni üret/getir
         const ok1 = await esyayiGarantiEt(recipe.first, new Set(visiting));
         if (!ok1) return false;
 
-        // 2. İkinci bileşeni üret/getir
         const ok2 = await esyayiGarantiEt(recipe.second, new Set(visiting));
         if (!ok2) return false;
 
-        // 3. İki bileşeni de masaya çıkar ve birleştir
         const targetX = window.innerWidth * 0.35;
         const targetY = window.innerHeight * 0.40;
 
         const count1 = getBoardItems().length;
         await masayaEsyaCikarByName(recipe.first, targetX, targetY);
-        let el1 = await masadanYeniEsyaBekle(count1, Math.max(200, solverHizMS * 2));
+        let el1 = await masadanYeniEsyaBekle(count1, Math.max(50, solverHizMS * 2));
 
         const count2 = getBoardItems().length;
         await masayaEsyaCikarByName(recipe.second, targetX + 15, targetY + 15);
-        let el2 = await masadanYeniEsyaBekle(count2, Math.max(200, solverHizMS * 2));
+        let el2 = await masadanYeniEsyaBekle(count2, Math.max(50, solverHizMS * 2));
 
         if (el1 && el2) {
+            await rateLimitKontrol();
             ikiEsyayiBirlestir(el1, el2);
             infoText.innerText = `✨ Üretildi: ${recipe.result}`;
-            await new Promise(r => setTimeout(r, Math.max(80, solverHizMS)));
+            await new Promise(r => setTimeout(r, Math.max(10, solverHizMS)));
         }
 
         visiting.delete(norm);
@@ -585,6 +645,7 @@
 
     async function otoKoymaDongusu() {
         while (calisiyor) {
+            await rateLimitKontrol();
             const items = getSidebarItems();
             if (items.length === 0) {
                 infoText.innerText = 'Menüde eşya bulunamadı!';
@@ -619,6 +680,7 @@
 
                 for (let t = 0; t < tekrarSayisi; t++) {
                     if (!calisiyor) break;
+                    await rateLimitKontrol();
                     esyayiMasayaAt(targetEl);
                     infoText.innerText = `🎲 Rastgele (${t + 1}/${tekrarSayisi}): ${esyaAdi}`;
                     await new Promise(r => setTimeout(r, hizMS));
@@ -651,6 +713,7 @@
         combineBtn.style.backgroundColor = '#dc2626';
 
         while (combineCalisiyor) {
+            await rateLimitKontrol();
             let boardItems = getBoardItems();
 
             if (boardItems.length < 2) {
@@ -665,6 +728,7 @@
                 for (let j = i + 1; j < boardItems.length; j++) {
                     if (!combineCalisiyor) break;
 
+                    await rateLimitKontrol();
                     const guncelBoard = getBoardItems();
                     const el1 = boardItems[i];
                     const el2 = boardItems[j];
@@ -686,7 +750,7 @@
 
             if (!yapildi && combineCalisiyor) {
                 infoText.innerText = '🔄 Masadaki tur bitti, yeni eşya bekleniyor...';
-                await new Promise(r => setTimeout(r, 800));
+                await new Promise(r => setTimeout(r, 500));
             }
         }
 
@@ -707,7 +771,7 @@
     };
 
     // ==========================================
-    // 8. YEREL TARİF ÇÖZÜCÜ (REKÜRSİF DESTEKLİ & ENVANTER ATLAMALI)
+    // 8. YEREL TARİF ÇÖZÜCÜ
     // ==========================================
 
     async function tarifiBulAndCoz(inputStr) {
@@ -738,36 +802,35 @@
 
         for (let i = 0; i < adimlar.length; i++) {
             if (!solverCalisiyor) break;
+            await rateLimitKontrol();
 
             const step = adimlar[i];
             const first = step.first;
             const second = step.second;
             const result = step.result || 'Sonuç';
 
-            // --- AKILLI ENVANTER KONTROLÜ (v20.0) ---
-            // Tarifteki sonuç elemanı zaten envanterde/menüde varsa o adımı atla!
             if (result && result !== 'Sonuç' && await itemVarMiMenude(result)) {
-                infoText.innerText = `[${i + 1}/${adimlar.length}] ⏭️ [ATLANDI] "${result}" zaten menüde var.`;
-                await new Promise(r => setTimeout(r, 100));
+                infoText.innerText = `[${i + 1}/${adimlar.length}] ⏭️ [ATLANDI] "${result}" zaten var.`;
+                await new Promise(r => setTimeout(r, 20));
                 continue;
             }
 
             infoText.innerText = `[${i + 1}/${adimlar.length}] Kontrol Ediliyor: ${first} + ${second}`;
 
-            // EKSİK MALZEMELERİ GERİYE DÖNÜK ÜRET (REKÜRSİF MANTIĞI)
             const ok1 = await esyayiGarantiEt(first);
             const ok2 = await esyayiGarantiEt(second);
 
             if (ok1 && ok2) {
+                await rateLimitKontrol();
                 infoText.innerText = `[${i + 1}/${adimlar.length}] ${first} + ${second} ➔ ${result}`;
 
                 const count1 = getBoardItems().length;
                 await masayaEsyaCikarByName(first, targetX, targetY);
-                let el1 = await masadanYeniEsyaBekle(count1, Math.max(200, solverHizMS * 2));
+                let el1 = await masadanYeniEsyaBekle(count1, Math.max(50, solverHizMS * 2));
 
                 const count2 = getBoardItems().length;
                 await masayaEsyaCikarByName(second, targetX + 15, targetY + 15);
-                let el2 = await masadanYeniEsyaBekle(count2, Math.max(200, solverHizMS * 2));
+                let el2 = await masadanYeniEsyaBekle(count2, Math.max(50, solverHizMS * 2));
 
                 if (el1 && el2) {
                     ikiEsyayiBirlestir(el1, el2);
@@ -780,7 +843,7 @@
             } else {
                 const eksik = !ok1 ? first : second;
                 infoText.innerText = `⚠️ "${eksik}" üretilemedi, sonraki adıma geçiliyor...`;
-                await new Promise(r => setTimeout(r, 400));
+                await new Promise(r => setTimeout(r, 200));
             }
 
             await new Promise(r => setTimeout(r, solverHizMS));
@@ -807,5 +870,5 @@
         tarifiBulAndCoz(targetInput.value);
     };
 
-    console.log("%c[Tekdoz Bot] v20.0 (Recursive Auto-Craft) Aktif!", "color: #38bdf8; font-weight: bold;");
+    console.log("%c[Tekdoz Bot] v20.0 (Custom Speed Inputs Enabled)", "color: #38bdf8; font-weight: bold;");
 })();
